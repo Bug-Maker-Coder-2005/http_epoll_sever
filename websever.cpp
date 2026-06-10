@@ -4,13 +4,16 @@
 #include<fcntl.h>
 #include<sstream>
 #include<fstream>
+#include<thread>
+#include<queue>
+#include<memory>
 #include<functional>
 #include<unordered_map>
 #include<netinet/in.h>
 #include<sys/socket.h>
 #include<sys/epoll.h>
 
-
+#define THREAD_NUM 8
 using namespace std;
 
 namespace
@@ -58,9 +61,10 @@ namespace
             {
                 if(errno == EINTR)
                     continue;
-                    buf.clear();
-                    close(fd);
-                    return;
+
+                buf.clear();
+                close(fd);
+                return;
             }
             else if(n == 0)
             {
@@ -155,7 +159,6 @@ public:
     {
         _listenfd = socket(AF_INET,SOCK_STREAM,0);
         int flags = fcntl(_listenfd,F_GETFL,0);
-        fcntl(_listenfd,F_SETFL,flags | O_NONBLOCK);
         
         struct sockaddr_in servaddr;
         servaddr.sin_family = AF_INET;
@@ -167,7 +170,16 @@ public:
         int opt = 1;
         setsockopt(_listenfd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));  //设置端口复用，检测死连接，检测对端是否断开，崩溃
         setsockopt(_listenfd,SOL_SOCKET,SO_KEEPALIVE,&opt,sizeof(opt));
-
+        if(-1 == setsockopt(_listenfd,SOL_SOCKET,SO_REUSEPORT,&opt,sizeof(opt)))
+        {
+            perror("reuserport faliure");
+            exit(1);
+        }
+        if(-1 == fcntl(_listenfd,F_SETFL,flags | O_NONBLOCK))
+        {
+            perror("fcntl error");
+            exit(1);
+        }
         if(bind(_listenfd,(struct sockaddr*)&servaddr,servlen) == -1)
         {
             perror("bind failure");
@@ -240,6 +252,8 @@ private:
 
     void conn_close(int fd)
     {
+        auto it = _conn.find(fd);
+        if(it == _conn.end()) return;
         epoll_ctl(_epfd,EPOLL_CTL_DEL,fd,nullptr);
         close(fd);
         _conn.erase(fd);
@@ -275,6 +289,7 @@ private:
             if(http_pars(req,_conn[fd].rbuf,consumed))
             {
                 _conn[fd].rbuf.erase(0,consumed);
+                _conn[fd].wbuf.clear();
 
                 string path = req.path;
                 string body,file_path;
@@ -349,12 +364,12 @@ private:
         }
     }
 
-    void do_response(int fd)
+void do_response(int fd)
 {
     auto &conn = _conn[fd];
     while(!conn.wbuf.empty())
     {
-        int n = send(fd,conn.wbuf.data(),conn.wbuf.size(),0);
+        int n = send(fd,conn.wbuf.data(),conn.wbuf.size(),MSG_NOSIGNAL);
         if(n == -1)
         {
             if(errno == EAGAIN || errno == EWOULDBLOCK)
@@ -368,13 +383,14 @@ private:
             else
             {
                 conn_close(fd);
+                return;
             }
         }
         if(n > 0)
         conn.wbuf.erase(0,n);
     }
     set_ev(fd,EPOLLIN | EPOLLET,0);
-}
+} 
 
     struct Conncontext
     {
@@ -390,12 +406,19 @@ private:
 
 int main(void)
 {
-    HttpSever sever;
-    sever.start();
-    while(1)
+    vector<thread> vec;
+    for(int i=0;i<THREAD_NUM;++i)
     {
-
+        vec.emplace_back([&](){
+            HttpSever sever;
+            sever.start();
+        });
     }
+    for(auto &t : vec)
+    {
+        t.join();
+    }
+    
 
     return 0;
 }
