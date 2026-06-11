@@ -128,8 +128,9 @@ bool http_pars(HttpRequest &req,string &buf,size_t &consumed)
         string value = buf.substr(colon + 1,line_end - colon - 1);
         req.header[key] = value;
         pos = line_end + 2;
+        
+        
     }
-
     //检查body长度
     size_t body_start = header_end + 4;
     auto it = req.header.find("Content-Length");
@@ -223,29 +224,39 @@ public:
     }
 
 private:
-    std::string make_404() {
+    std::string make_404(int fd) {
     std::string body = "<html>"
                        "<head><title>404 Not Found</title></head>"
                        "<body><h1>404 Not Found</h1>"
                        "<p>The requested URL was not found.</p>"
                        "</body></html>";
     
+    auto it = _conn.find(fd);
+    bool connect = (it != _conn.end() && it->second.connect_flag);
     std::string resp;
     resp += "HTTP/1.1 404 Not Found\r\n";
     resp += "Content-Type: text/html; charset=utf-8\r\n";
     resp += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    resp += "Connection: keep-alive\r\n";
+    if(connect)
+        resp += "Connection: keep-alive\r\n";
+    else
+        resp += "Connection: Close\r\n";
     resp += "\r\n";
     resp += body;
     return resp;
 }
 
-    void make_response(string& buf,string& file,string& body)
+    void make_response(int fd,string& buf,string& file,string& body)
     {
+        auto it = _conn.find(fd);
+        bool connect = (it != _conn.end() && it->second.connect_flag);
         buf += "HTTP/1.1 200 OK\r\n";
         buf += "Content-Type:" + file +"\r\n";
         buf += "Content-Length:" + to_string(body.size()) + "\r\n";
-        buf += "Connection: Keep-alive\r\n";
+        if(connect)
+            buf += "Connection: Keep-alive\r\n";
+        else
+            buf += "Connection: Close\r\n";
         buf += "\r\n";
         buf += body;
     }
@@ -288,6 +299,10 @@ private:
         {
             if(http_pars(req,_conn[fd].rbuf,consumed))
             {
+                if(req.header["Connection"] == "Close")
+                {
+                    _conn[fd].connect_flag = false;
+                }
                 _conn[fd].rbuf.erase(0,consumed);
                 _conn[fd].wbuf.clear();
 
@@ -305,11 +320,12 @@ private:
                 }
                 else
                 {
-                    _conn[fd].wbuf = make_404();
+                    _conn[fd].wbuf = make_404(fd);
+                    break;
                 }
 
                 string file = getmine(file_path);
-                make_response(_conn[fd].wbuf,file,body);
+                make_response(fd,_conn[fd].wbuf,file,body);
             }
             else
             {
@@ -389,6 +405,11 @@ void do_response(int fd)
         if(n > 0)
         conn.wbuf.erase(0,n);
     }
+    if(conn.connect_flag == false)
+    {
+        conn_close(fd);
+        return;
+    }
     set_ev(fd,EPOLLIN | EPOLLET,0);
 } 
 
@@ -396,6 +417,7 @@ void do_response(int fd)
     {
         string wbuf;
         string rbuf;
+        bool connect_flag = true;
     };
 
     int _epfd;
