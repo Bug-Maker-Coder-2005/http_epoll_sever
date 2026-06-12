@@ -331,6 +331,13 @@ private:
             _conn[fd].rbuf.append(temp,n);
         }
 
+        if(_conn[fd].rbuf.size() > 8192)
+        {
+            conn_close(fd);
+            return;
+        }
+
+
         HttpRequest req;
         size_t consumed = 0;
         while(true)
