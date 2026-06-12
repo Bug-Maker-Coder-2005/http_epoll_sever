@@ -5,8 +5,10 @@
 #include<sstream>
 #include<fstream>
 #include<thread>
+#include<errno.h>
 #include<queue>
 #include<memory>
+#include<string.h>
 #include<functional>
 #include<unordered_map>
 #include<netinet/in.h>
@@ -28,55 +30,16 @@ namespace
         size_t content_length = 0;  //body长度
     };
 
-    void read_file(string &path,string& buf)
+    static inline string trim(const string& str)
     {
-        int fd = open(path.c_str(),O_RDONLY);
-        if(fd < 0)
-        {
-            buf.clear();
-            return;
-        }
-
-        off_t size = lseek(fd,0,SEEK_END);
-        if(size < 0)
-        {
-            close(fd);
-            buf.clear();
-            return;
-        }
-        
-        if(lseek(fd,0,SEEK_SET) < 0)
-        {
-            close(fd);
-            buf.clear();
-            return;
-        }
-
-        buf.resize(size);
-        size_t total = 0;
-        while(total < (size_t)size)
-        {
-            int n = read(fd,&buf[total],size - total);
-            if(n == -1)
-            {
-                if(errno == EINTR)
-                    continue;
-
-                buf.clear();
-                close(fd);
-                return;
-            }
-            else if(n == 0)
-            {
-                break;
-            }
-            total += n;
-        }
-        buf.resize(total);
-        close(fd);
+        auto start = str.find_first_not_of(" \t\r\n");
+        if(start == string::npos)return "";
+        auto end = str.find_last_not_of(" \t\r\n");
+        return str.substr(start,end - start + 1);
     }
+
     
-    string getmine(string& str)
+    string getMinm(const string& str)
     {
         size_t dot = str.rfind('.');
         if(dot == string::npos)
@@ -124,8 +87,8 @@ bool http_pars(HttpRequest &req,string &buf,size_t &consumed)
             continue;
         }
 
-        string key = buf.substr(pos,colon - pos);
-        string value = buf.substr(colon + 1,line_end - colon - 1);
+        string key = trim(buf.substr(pos,colon - pos));
+        string value = trim(buf.substr(colon + 1,line_end - colon - 1));
         req.header[key] = value;
         pos = line_end + 2;
         
@@ -153,11 +116,14 @@ bool http_pars(HttpRequest &req,string &buf,size_t &consumed)
 class HttpSever
 {
 public:
+    unordered_map<string,string> file_cache;
+
     HttpSever():_port(8080){}
     ~HttpSever(){}
 
     void start()
     {
+        load_files();
         _listenfd = socket(AF_INET,SOCK_STREAM,0);
         int flags = fcntl(_listenfd,F_GETFL,0);
         
@@ -246,12 +212,12 @@ private:
     return resp;
 }
 
-    void make_response(int fd,string& buf,string& file,string& body)
+    void make_response(int fd,string& buf,const string& mime_type,string& body)
     {
         auto it = _conn.find(fd);
         bool connect = (it != _conn.end() && it->second.connect_flag);
         buf += "HTTP/1.1 200 OK\r\n";
-        buf += "Content-Type:" + file +"\r\n";
+        buf += "Content-Type:" + mime_type +"\r\n";
         buf += "Content-Length:" + to_string(body.size()) + "\r\n";
         if(connect)
             buf += "Connection: Keep-alive\r\n";
@@ -259,6 +225,16 @@ private:
             buf += "Connection: Close\r\n";
         buf += "\r\n";
         buf += body;
+    }
+
+        void load_files()
+    {
+        auto load = [](const string& path)->string{
+            fstream f(path,ios::binary | ios::in);
+            return string(istreambuf_iterator<char>(f),istreambuf_iterator<char>());
+        };
+        file_cache["./html/index.html"] = load("./html/index.html");
+        file_cache["./html/profile.html"] = load("./html/profile.html");
     }
 
     void conn_close(int fd)
@@ -307,16 +283,14 @@ private:
                 _conn[fd].wbuf.clear();
 
                 string path = req.path;
-                string body,file_path;
+                string file_path;
                 if(path == "/" || path == "/index.html" || path == "/index")
                 {
                     file_path = "./html/index.html";
-                    read_file(file_path,body);
                 }
                 else if(path == "/profile.html" || path == "/profile")
                 {
                     file_path = "./html/profile.html";
-                    read_file(file_path,body);
                 }
                 else
                 {
@@ -324,8 +298,10 @@ private:
                     break;
                 }
 
-                string file = getmine(file_path);
-                make_response(fd,_conn[fd].wbuf,file,body);
+                auto it = file_cache.find(file_path);
+                string &body = it->second;
+                string mime_type = getMinm(file_path);
+                make_response(fd,_conn[fd].wbuf,mime_type,body);
             }
             else
             {
