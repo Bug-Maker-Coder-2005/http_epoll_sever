@@ -6,7 +6,10 @@
 #include<fstream>
 #include<thread>
 #include<errno.h>
+#include<dirent.h>
+#include<sys/types.h>
 #include<queue>
+#include<sys/stat.h>
 #include<memory>
 #include<string.h>
 #include<functional>
@@ -229,12 +232,35 @@ private:
 
         void load_files()
     {
-        auto load = [](const string& path)->string{
-            fstream f(path,ios::binary | ios::in);
+        auto load = [](const string& path){
+            fstream f(path,ios::in | ios::binary);
+            if(!f)
+            {
+                perror("load error");
+                exit(1);
+            }
             return string(istreambuf_iterator<char>(f),istreambuf_iterator<char>());
         };
-        file_cache["./html/index.html"] = load("./html/index.html");
-        file_cache["./html/profile.html"] = load("./html/profile.html");
+        DIR* dir = opendir("./html");
+        if(!dir)
+        {
+            perror("opendir error");
+            exit(1);
+        }
+        
+        struct dirent* file;
+        while((file=readdir(dir)) != nullptr)
+        {
+            if(file->d_name[0] == '.') continue;
+
+            string path = string("./html/") + file->d_name;
+            struct stat st;
+            if(stat(path.c_str(),&st) < 0)continue;
+            if(!S_ISREG(st.st_mode))continue;
+
+            file_cache[path] = load(path);
+        }
+        closedir(dir);
     }
 
     void conn_close(int fd)
@@ -292,6 +318,22 @@ private:
                 {
                     file_path = "./html/profile.html";
                 }
+                else if(path == "/data.json")
+                {
+                    file_path = "./html/data.json";
+                }
+                else if(path == "/app.js")
+                {
+                    file_path = "./html/app.js";
+                }
+                else if(path == "/style.css")
+                {
+                    file_path = "./html/style.css";
+                }
+                else if(path == "/readme.txt")
+                {
+                    file_path = "./html/readme.txt";
+                }
                 else
                 {
                     _conn[fd].wbuf = make_404(fd);
@@ -299,9 +341,15 @@ private:
                 }
 
                 auto it = file_cache.find(file_path);
+                if(it == file_cache.end())
+                {
+                    perror("file_cache find");
+                    exit(1);
+                }
                 string &body = it->second;
                 string mime_type = getMinm(file_path);
                 make_response(fd,_conn[fd].wbuf,mime_type,body);
+                break;
             }
             else
             {
