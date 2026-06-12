@@ -11,6 +11,7 @@
 #include<queue>
 #include<sys/stat.h>
 #include<memory>
+#include<time.h>
 #include<string.h>
 #include<functional>
 #include<unordered_map>
@@ -19,6 +20,8 @@
 #include<sys/epoll.h>
 
 #define THREAD_NUM 8
+#define IDLE_TIMEOUT 60000
+#define CHECK_TIME 5000
 using namespace std;
 
 namespace
@@ -126,6 +129,7 @@ public:
 
     void start()
     {
+        last_check = time(nullptr);
         load_files();
         _listenfd = socket(AF_INET,SOCK_STREAM,0);
         int flags = fcntl(_listenfd,F_GETFL,0);
@@ -171,12 +175,24 @@ public:
         vector<struct epoll_event>events(1024);
         while(1)
         {
-            int nready = epoll_wait(_epfd,events.data(),events.size(),-1);  //events.data()用来获取底层数组首元素指针
+            int nready = epoll_wait(_epfd,events.data(),events.size(),CHECK_TIME);  //events.data()用来获取底层数组首元素指针
+            auto now = time(nullptr);
+            if((now - last_check)*1000 > CHECK_TIME)
+            {
+                check_time();
+                last_check = now;
+            }
+
             for(int i=0;i<nready;++i)
             {
                 if(events[i].data.fd == _listenfd)
                 {
                     OnAccept(_listenfd);
+                    continue;
+                }
+                if(events[i].events & (EPOLLHUP | EPOLLERR))
+                {
+                    conn_close(events[i].data.fd);
                     continue;
                 }
                 if(events[i].events & EPOLLIN)
@@ -220,8 +236,8 @@ private:
         auto it = _conn.find(fd);
         bool connect = (it != _conn.end() && it->second.connect_flag);
         buf += "HTTP/1.1 200 OK\r\n";
-        buf += "Content-Type:" + mime_type +"\r\n";
-        buf += "Content-Length:" + to_string(body.size()) + "\r\n";
+        buf += "Content-Type: " + mime_type +"\r\n";
+        buf += "Content-Length: " + to_string(body.size()) + "\r\n";
         if(connect)
             buf += "Connection: Keep-alive\r\n";
         else
@@ -263,6 +279,23 @@ private:
         closedir(dir);
     }
 
+    void check_time()
+    {
+        auto now = time(nullptr);
+        vector<int> close_vec;
+        for(auto &it: _conn)
+        {
+            if((now - it.second.last_time)*1000 >= IDLE_TIMEOUT)
+            {
+                close_vec.push_back(it.first);
+            }
+        }
+          for(auto &fd: close_vec)
+        {
+            conn_close(fd);
+        }
+    }
+
     void conn_close(int fd)
     {
         auto it = _conn.find(fd);
@@ -291,6 +324,9 @@ private:
                 conn_close(fd);
                 return;
             }
+            
+            auto now = time(nullptr);
+            _conn[fd].last_time = now;
 
             _conn[fd].rbuf.append(temp,n);
         }
@@ -358,7 +394,7 @@ private:
         }
         if(!_conn[fd].wbuf.empty())
         {
-            set_ev(fd,EPOLLOUT | EPOLLET,0);
+            set_ev(fd,EPOLLOUT | EPOLLET | EPOLLIN,0);
         }
     }
 
@@ -372,12 +408,23 @@ private:
         struct sockaddr_in clieaddr;
         socklen_t clielen = sizeof(clieaddr);
 
+
         while(1)
         {
             int connfd = accept(fd,(struct sockaddr*)&clieaddr,&clielen);
-            if(connfd == -1 && errno == EAGAIN)
+            if(connfd == -1)
+            {
+                if(errno == EAGAIN || errno == EWOULDBLOCK)
+                    break;
+                if(errno == EINTR)
+                    continue;
+                
+                perror("accept error");
                 break;
-
+            }
+            
+            auto now = time(nullptr);
+            _conn[connfd].last_time = now;
             int flags = fcntl(connfd,F_GETFL,0);
             fcntl(connfd,F_SETFL,flags | O_NONBLOCK);
 
@@ -427,14 +474,19 @@ void do_response(int fd)
             }
         }
         if(n > 0)
-        conn.wbuf.erase(0,n);
+        {
+            auto now = time(nullptr);
+            _conn[fd].last_time = now;
+            conn.wbuf.erase(0,n);
+        }
     }
+
     if(conn.connect_flag == false)
     {
         conn_close(fd);
         return;
     }
-    set_ev(fd,EPOLLIN | EPOLLET,0);
+    set_ev(fd,EPOLLIN | EPOLLET | EPOLLOUT,0);
 } 
 
     struct Conncontext
@@ -442,11 +494,13 @@ void do_response(int fd)
         string wbuf;
         string rbuf;
         bool connect_flag = true;
+        time_t last_time = time(nullptr);
     };
 
     int _epfd;
     int _listenfd;
     int _port;
+    time_t last_check;
     unordered_map<int,Conncontext> _conn;
 };
 
