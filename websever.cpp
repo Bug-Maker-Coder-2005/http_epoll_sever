@@ -6,6 +6,7 @@
 #include<fstream>
 #include<thread>
 #include<errno.h>
+#include<cctype>
 #include<dirent.h>
 #include<sys/types.h>
 #include<queue>
@@ -18,11 +19,14 @@
 #include<netinet/in.h>
 #include<sys/socket.h>
 #include<sys/epoll.h>
+#include"json.hpp"
+using json = nlohmann::json;
 
 #define THREAD_NUM 8
 #define IDLE_TIMEOUT 60000
 #define CHECK_TIME 5000
 using namespace std;
+unordered_map<string,string> g_users;
 
 namespace
 {
@@ -62,6 +66,21 @@ namespace
         if (file == ".json") return "application/json";
         if (file == ".txt")  return "text/plain";
         return "application/octet-stream";
+    }
+}
+
+bool json_pars(const string& body,string& username,string& password)
+{
+    try
+    {
+        json j = json::parse(body);
+        username = j["username"];
+        password = j["password"];
+        return true;
+    }
+    catch(...)
+    {
+        return false;
     }
 }
 
@@ -350,6 +369,68 @@ private:
                 }
                 _conn[fd].rbuf.erase(0,consumed);
                 _conn[fd].wbuf.clear();
+                if(req.method == "POST" && req.path == "/api/echo")
+                {
+                    _conn[fd].wbuf += "HTTP/1.1 200 OK\r\n";
+                    _conn[fd].wbuf += "Content-Type: application/json\r\n";
+                    _conn[fd].wbuf += "Content-Length: " + to_string(req.body.size()) + "\r\n";
+                    _conn[fd].wbuf += "\r\n";
+                    _conn[fd].wbuf += req.body;
+                    continue;
+                }
+                if(req.method == "POST" && req.path == "/api/register")
+                {
+                    string username,password;
+                    if(!json_pars(req.body,username,password))
+                    {
+                        _conn[fd].wbuf += "HTTP/1.1 400 Bad Request\r\n";
+                        _conn[fd].wbuf += "Content-Type: application/json\r\n";
+                        _conn[fd].wbuf += "Content-Length: 26\r\n";
+                        _conn[fd].wbuf += "\r\n";
+                        _conn[fd].wbuf += R"({"msg":"invalid json"})";
+                        continue;
+                    }
+                    g_users[username] = password;
+                    string resp = R"({"msg":"ok"})";
+                    _conn[fd].wbuf += "HTTP/1.1 200 OK\r\n";
+                    _conn[fd].wbuf += "Content-Type: application/json\r\n";
+                    _conn[fd].wbuf += "Content-Length: " + to_string(resp.size()) + "\r\n";
+                    _conn[fd].wbuf += "\r\n";
+                    _conn[fd].wbuf += resp;
+                    continue;
+                }
+                if(req.method == "POST" && req.path == "/api/login")
+                {
+                    string username,password;
+                    if(!json_pars(req.body,username,password))
+                    {
+                        _conn[fd].wbuf += "HTTP/1.1 400 Bad Request\r\n";
+                        _conn[fd].wbuf += "Content-Type: application/json\r\n";
+                        _conn[fd].wbuf += "Content-Length: 26\r\n";
+                        _conn[fd].wbuf += "\r\n";
+                        _conn[fd].wbuf += R"({"msg":"invalid json"})";
+                        continue;
+                    }
+                    auto it = g_users.find(username);
+                    if(it == g_users.end() || it->second != password)
+                    {
+                        _conn[fd].wbuf += "HTTP/1.1 401 Unauthorized\r\n";
+                        _conn[fd].wbuf += "Content-Type: application/json\r\n";
+                        _conn[fd].wbuf += "Content-Length: 29\r\n";
+                        _conn[fd].wbuf += "\r\n";
+                        _conn[fd].wbuf += R"({"msg":"wrong user or pass"})";
+                        continue;
+                    }
+                    json resp;
+                    resp["msg"] = "ok";
+                    string resp_str = resp.dump();
+                    _conn[fd].wbuf += "HTTP/1.1 200 OK\r\n";
+                    _conn[fd].wbuf += "Content-Type: application/json\r\n";
+                    _conn[fd].wbuf += "Content-Length: " + to_string(resp_str.size()) + "\r\n";
+                    _conn[fd].wbuf += "\r\n";
+                    _conn[fd].wbuf += resp_str;
+                    continue;
+                }
 
                 string path = req.path;
                 string file_path;
@@ -387,7 +468,8 @@ private:
                 if(it == file_cache.end())
                 {
                     perror("file_cache find");
-                    exit(1);
+                    _conn[fd].wbuf = make_404(fd);
+                    continue;
                 }
                 string &body = it->second;
                 string mime_type = getMinm(file_path);
@@ -401,7 +483,7 @@ private:
         }
         if(!_conn[fd].wbuf.empty())
         {
-            set_ev(fd,EPOLLOUT | EPOLLET | EPOLLIN,0);
+            set_ev(fd,EPOLLOUT | EPOLLET,0);
         }
     }
 
